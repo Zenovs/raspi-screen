@@ -1,0 +1,24 @@
+<?xml version="1.0"?>
+<labwc_config>
+  <core>
+    <!-- Cursor ausblenden -->
+    <hideCursor>true</hideCursor>
+  </core>
+
+  <keyboard>
+    <keybind key="A-F4">
+      <action name="Close"/>
+    </keybind>
+    <keybind key="A-Tab">
+      <action name="NextWindow"/>
+    </keybind>
+  </keyboard>
+
+  <windowRules>
+    <!-- Chromium im Vollbild ohne Dekoration -->
+    <windowRule identifier="chromium*">
+      <property name="skipTaskbar" value="yes"/>
+      <action name="Maximize"/>
+    </windowRule>
+  </windowRules>
+</labwc_config>

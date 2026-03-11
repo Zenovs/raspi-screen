@@ -1,0 +1,30 @@
+#!/bin/bash
+
+# Display-Standby deaktivieren (Display bleibt immer an)
+wlopm --on '*' &
+sleep 2
+
+# Bildschirmschoner deaktivieren
+export DISPLAY=:0
+
+# Chromium im Kiosk-Modus starten
+chromium \
+    --kiosk \
+    --noerrdialogs \
+    --disable-infobars \
+    --disable-session-crashed-bubble \
+    --disable-restore-session-state \
+    --disable-features=TranslateUI \
+    --disable-translate \
+    --no-first-run \
+    --start-fullscreen \
+    --start-maximized \
+    --autoplay-policy=no-user-gesture-required \
+    --check-for-update-interval=31536000 \
+    --disable-background-networking \
+    --disable-component-update \
+    --disable-default-apps \
+    --disable-extensions \
+    --disable-popup-blocking \
+    --password-store=basic \
+    "{{KIOSK_URL}}" &
