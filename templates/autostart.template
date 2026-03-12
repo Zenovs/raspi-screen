@@ -1,22 +1,28 @@
 #!/bin/bash
 
-# Display-Standby deaktivieren (Display bleibt immer an)
-wlopm --on '*' &
-sleep 2
+# Bildschirmschoner und Standby deaktivieren
+wlopm --set-standby off
 
-# Bildschirmschoner deaktivieren
-export DISPLAY=:0
+# ydotool Daemon starten, um später die Maus zu bewegen
+ydotoold &
 
-# Chromium im Kiosk-Modus starten
+# 50 Sekunden warten, bis System und Chromium komplett geladen sind,
+# dann Maus um 100 Pixel bewegen, damit die Webflow-Regel den Cursor versteckt
+(sleep 50 && ydotool mousemove 100 100) &
+
+# Chromium im Kiosk- und Inkognito-Modus starten
+# Übersetzungsfunktionen soweit wie möglich deaktivieren
 chromium \
     --kiosk \
+    --incognito \
     --noerrdialogs \
     --disable-infobars \
     --disable-session-crashed-bubble \
     --disable-restore-session-state \
-    --disable-features=TranslateUI \
-    --disable-translate \
     --no-first-run \
+    --password-store=basic \
+    --disable-translate \
+    --disable-features=Translate,TranslateUI,LanguageDetection,TranslateSettings \
     --start-fullscreen \
     --start-maximized \
     --autoplay-policy=no-user-gesture-required \
@@ -26,5 +32,4 @@ chromium \
     --disable-default-apps \
     --disable-extensions \
     --disable-popup-blocking \
-    --password-store=basic \
     "{{KIOSK_URL}}" &

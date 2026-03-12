@@ -3,8 +3,11 @@
 # Raspberry Pi Kiosk Installer
 # Für Debian 13 mit labwc (Wayland Compositor)
 #
-# Verwendung: sudo ./install.sh [KIOSK_URL]
+# Verwendung: sudo ./install.sh [KIOSK_URL] [--static-ip "NETWORK_NAME" IP/MASK GATEWAY]
 # Beispiel:   sudo ./install.sh https://example.com/dashboard
+# Beispiel mit statischer IP:
+#   sudo ./install.sh https://schnyder.webflow.io/screens/sichtbar-screen \
+#     --static-ip "Schnyder Werbung Staff" 192.168.19.156/24 192.168.19.1
 #
 
 set -e
@@ -16,8 +19,36 @@ YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
 # Standard-URL (Platzhalter)
-DEFAULT_URL="https://www.deineurl.ch/hiereingeben"
-KIOSK_URL="${1:-$DEFAULT_URL}"
+DEFAULT_URL="https://deine-url.ch"
+KIOSK_URL=""
+STATIC_IP_NETWORK=""
+STATIC_IP_ADDRESS=""
+STATIC_IP_GATEWAY=""
+
+# Parameter parsen
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --static-ip)
+            STATIC_IP_NETWORK="$2"
+            STATIC_IP_ADDRESS="$3"
+            STATIC_IP_GATEWAY="$4"
+            shift 4
+            ;;
+        -*)
+            echo -e "${RED}Unbekannte Option: $1${NC}"
+            exit 1
+            ;;
+        *)
+            if [ -z "$KIOSK_URL" ]; then
+                KIOSK_URL="$1"
+            fi
+            shift
+            ;;
+    esac
+done
+
+# Standard-URL setzen falls nicht angegeben
+KIOSK_URL="${KIOSK_URL:-$DEFAULT_URL}"
 
 # Benutzer für Kiosk (aktueller Benutzer oder Standard)
 KIOSK_USER="${SUDO_USER:-pi}"
@@ -31,7 +62,7 @@ echo ""
 # Sudo-Check
 if [ "$EUID" -ne 0 ]; then
     echo -e "${RED}Fehler: Dieses Skript muss mit sudo ausgeführt werden!${NC}"
-    echo "Verwendung: sudo $0 [KIOSK_URL]"
+    echo "Verwendung: sudo $0 [KIOSK_URL] [--static-ip \"NETWORK\" IP/MASK GATEWAY]"
     exit 1
 fi
 
@@ -39,6 +70,11 @@ echo -e "${YELLOW}Konfiguration:${NC}"
 echo "  Kiosk-URL:    $KIOSK_URL"
 echo "  Benutzer:     $KIOSK_USER"
 echo "  Home-Pfad:    $KIOSK_HOME"
+if [ -n "$STATIC_IP_NETWORK" ]; then
+    echo "  Netzwerk:     $STATIC_IP_NETWORK"
+    echo "  Statische IP: $STATIC_IP_ADDRESS"
+    echo "  Gateway:      $STATIC_IP_GATEWAY"
+fi
 echo ""
 
 # Bestätigung
@@ -50,11 +86,11 @@ if [[ ! $REPLY =~ ^[JjYy]$ ]]; then
 fi
 
 echo ""
-echo -e "${YELLOW}[1/6] System wird aktualisiert...${NC}"
+echo -e "${YELLOW}[1/8] System wird aktualisiert...${NC}"
 apt update && apt upgrade -y
 
 echo ""
-echo -e "${YELLOW}[2/6] Pakete werden installiert...${NC}"
+echo -e "${YELLOW}[2/8] Pakete werden installiert...${NC}"
 apt install -y \
     labwc \
     chromium \
@@ -63,10 +99,42 @@ apt install -y \
     xdg-utils \
     fonts-dejavu \
     fonts-noto \
-    unclutter
+    cmake \
+    libevdev-dev \
+    git \
+    scdoc
 
 echo ""
-echo -e "${YELLOW}[3/6] labwc Konfiguration wird erstellt...${NC}"
+echo -e "${YELLOW}[3/8] ydotool wird aus Quellen gebaut...${NC}"
+
+# ydotool Installation
+YDOTOOL_DIR="/tmp/ydotool-build"
+if [ ! -f /usr/local/bin/ydotool ]; then
+    rm -rf "$YDOTOOL_DIR"
+    git clone https://github.com/ReimuNotMoe/ydotool.git "$YDOTOOL_DIR"
+    cd "$YDOTOOL_DIR"
+    mkdir -p build
+    cd build
+    cmake ..
+    make
+    make install
+    cd /
+    rm -rf "$YDOTOOL_DIR"
+    echo "  ydotool und ydotoold installiert in /usr/local/bin/"
+else
+    echo "  ydotool ist bereits installiert, überspringe..."
+fi
+
+# uinput Zugriffsrechte konfigurieren
+echo ""
+echo -e "${YELLOW}[4/8] uinput Zugriffsrechte werden konfiguriert...${NC}"
+usermod -aG input "$KIOSK_USER"
+echo 'KERNEL=="uinput", GROUP="input", MODE="0660", OPTIONS+="static_node=uinput"' > /etc/udev/rules.d/80-uinput.rules
+echo "  Benutzer $KIOSK_USER zur Gruppe 'input' hinzugefügt"
+echo "  udev-Regel für /dev/uinput erstellt"
+
+echo ""
+echo -e "${YELLOW}[5/8] labwc Konfiguration wird erstellt...${NC}"
 
 # labwc Konfigurationsverzeichnis erstellen
 mkdir -p "$KIOSK_HOME/.config/labwc"
@@ -105,23 +173,29 @@ echo "  rc.xml erstellt (hideCursor aktiviert)"
 cat > "$KIOSK_HOME/.config/labwc/autostart" << EOF
 #!/bin/bash
 
-# Display-Standby deaktivieren (Display bleibt immer an)
-wlopm --on '*' &
-sleep 2
+# Bildschirmschoner und Standby deaktivieren
+wlopm --set-standby off
 
-# Bildschirmschoner deaktivieren
-export DISPLAY=:0
+# ydotool Daemon starten, um später die Maus zu bewegen
+ydotoold &
 
-# Chromium im Kiosk-Modus starten
+# 50 Sekunden warten, bis System und Chromium komplett geladen sind,
+# dann Maus um 100 Pixel bewegen, damit die Webflow-Regel den Cursor versteckt
+(sleep 50 && ydotool mousemove 100 100) &
+
+# Chromium im Kiosk- und Inkognito-Modus starten
+# Übersetzungsfunktionen soweit wie möglich deaktivieren
 chromium \\
     --kiosk \\
+    --incognito \\
     --noerrdialogs \\
     --disable-infobars \\
     --disable-session-crashed-bubble \\
     --disable-restore-session-state \\
-    --disable-features=TranslateUI \\
-    --disable-translate \\
     --no-first-run \\
+    --password-store=basic \\
+    --disable-translate \\
+    --disable-features=Translate,TranslateUI,LanguageDetection,TranslateSettings \\
     --start-fullscreen \\
     --start-maximized \\
     --autoplay-policy=no-user-gesture-required \\
@@ -131,18 +205,17 @@ chromium \\
     --disable-default-apps \\
     --disable-extensions \\
     --disable-popup-blocking \\
-    --password-store=basic \\
     "$KIOSK_URL" &
 EOF
 
 chmod +x "$KIOSK_HOME/.config/labwc/autostart"
-echo "  autostart erstellt (Kiosk-Modus konfiguriert)"
+echo "  autostart erstellt (ydotool, Mausbewegung, Kiosk-Modus konfiguriert)"
 
 # Berechtigungen setzen
 chown -R "$KIOSK_USER:$KIOSK_USER" "$KIOSK_HOME/.config/labwc"
 
 echo ""
-echo -e "${YELLOW}[4/6] Chromium Managed Policy wird konfiguriert...${NC}"
+echo -e "${YELLOW}[6/8] Chromium Managed Policy und Boot-Target werden konfiguriert...${NC}"
 
 # Chromium Policy Verzeichnis erstellen
 mkdir -p /etc/chromium/policies/managed
@@ -156,8 +229,17 @@ EOF
 
 echo "  Policy erstellt: TranslateEnabled = false"
 
+# graphical.target setzen
+current_target=$(systemctl get-default)
+if [ "$current_target" != "graphical.target" ]; then
+    systemctl set-default graphical.target
+    echo "  Boot-Target auf graphical.target gesetzt (war: $current_target)"
+else
+    echo "  Boot-Target ist bereits graphical.target"
+fi
+
 echo ""
-echo -e "${YELLOW}[5/6] Display-Einstellungen werden konfiguriert...${NC}"
+echo -e "${YELLOW}[7/8] Display-Einstellungen und Autologin werden konfiguriert...${NC}"
 
 # wlopm systemd Service für permanentes Display
 cat > /etc/systemd/system/wlopm-keepalive.service << 'EOF'
@@ -177,9 +259,6 @@ EOF
 systemctl daemon-reload
 systemctl enable wlopm-keepalive.service
 echo "  wlopm Service aktiviert (Display bleibt immer an)"
-
-echo ""
-echo -e "${YELLOW}[6/6] Autostart für labwc wird konfiguriert...${NC}"
 
 # .bash_profile für automatischen labwc Start
 if ! grep -q "labwc" "$KIOSK_HOME/.bash_profile" 2>/dev/null; then
@@ -205,6 +284,24 @@ EOF
 systemctl daemon-reload
 echo "  Automatisches Login für $KIOSK_USER konfiguriert"
 
+# Optionale statische IP-Konfiguration
+echo ""
+echo -e "${YELLOW}[8/8] Optionale Konfigurationen...${NC}"
+
+if [ -n "$STATIC_IP_NETWORK" ] && [ -n "$STATIC_IP_ADDRESS" ] && [ -n "$STATIC_IP_GATEWAY" ]; then
+    echo "  Statische IP wird konfiguriert..."
+    nmcli connection modify "$STATIC_IP_NETWORK" \
+        ipv4.addresses "$STATIC_IP_ADDRESS" \
+        ipv4.gateway "$STATIC_IP_GATEWAY" \
+        ipv4.dns "1.1.1.1,8.8.8.8" \
+        ipv4.method manual
+    echo "  Statische IP konfiguriert für '$STATIC_IP_NETWORK'"
+    echo "  IP: $STATIC_IP_ADDRESS, Gateway: $STATIC_IP_GATEWAY"
+    echo -e "  ${YELLOW}Hinweis: Die Netzwerkverbindung muss nach dem Neustart neu aufgebaut werden.${NC}"
+else
+    echo "  Keine statische IP-Konfiguration angefordert (übersprungen)"
+fi
+
 echo ""
 echo -e "${GREEN}==========================================${NC}"
 echo -e "${GREEN}  Installation abgeschlossen!${NC}"
@@ -214,9 +311,13 @@ echo "Konfiguration:"
 echo "  - Kiosk-URL: $KIOSK_URL"
 echo "  - Benutzer:  $KIOSK_USER"
 echo "  - labwc:     $KIOSK_HOME/.config/labwc/"
+echo "  - ydotool:   /usr/local/bin/ydotool"
 echo ""
 echo -e "${YELLOW}URL nachträglich ändern:${NC}"
 echo "  nano $KIOSK_HOME/.config/labwc/autostart"
+echo ""
+echo -e "${RED}⚠️  WICHTIG: Ein Neustart ist erforderlich!${NC}"
+echo -e "${RED}   Die uinput-Gruppenrechte werden erst nach dem Neustart aktiv.${NC}"
 echo ""
 echo -e "${YELLOW}System jetzt neustarten:${NC}"
 echo "  sudo reboot"
