@@ -1,4 +1,6 @@
 # Sicherstellen, dass labwc auch ohne angeschlossene Eingabegeräte startet
 WLR_LIBINPUT_NO_DEVICES=1
+# Hardware-Cursor deaktivieren (vermeidet Rendering-Probleme auf RPi)
+WLR_NO_HARDWARE_CURSORS=1
 # GPU-Rendering (Pixman als Fallback für ältere RPi-Modelle)
 # WLR_RENDERER=pixman

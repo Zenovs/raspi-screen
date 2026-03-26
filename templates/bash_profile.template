@@ -1,0 +1,12 @@
+# Standard .profile laden (PATH, etc.)
+if [ -f "$HOME/.profile" ]; then
+    . "$HOME/.profile"
+fi
+
+# Automatisch labwc starten auf TTY1 (nicht bei SSH-Sessions)
+if [ -z "$WAYLAND_DISPLAY" ] && [ "$(tty)" = "/dev/tty1" ]; then
+    export XDG_SESSION_TYPE=wayland
+    export MOZ_ENABLE_WAYLAND=1
+    # labwc starten – dies setzt WAYLAND_DISPLAY und XDG_RUNTIME_DIR automatisch
+    exec labwc > /tmp/labwc.log 2>&1
+fi

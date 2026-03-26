@@ -1,19 +1,36 @@
 # sicht!bar Screen – Raspberry Pi Kiosk-Setup
 
-**Debian 13 / rpd-labwc / Wayland**
+**Debian 13 (Trixie) / labwc (Wayland Compositor)**
 
-Diese Dokumentation beschreibt, wie ein Raspberry Pi mit Debian 13 (Trixie) und rpd‑labwc so konfiguriert wird, dass:
+Diese Dokumentation beschreibt, wie ein Raspberry Pi mit Debian 13 (Trixie) und labwc so konfiguriert wird, dass:
 
 - Eine statische WLAN-IP verwendet wird
 - Beim Booten automatisch Chromium im Kiosk-Modus mit einer bestimmten URL startet
-- Bildschirmschoner / Standby deaktiviert sind
+- Bildschirmschoner / Standby / Console-Blanking deaktiviert sind
 - Der Mauszeiger ausgeblendet wird, indem er einmal automatisch bewegt wird (Trigger für Webflow-Regel)
 - Chromium keine Übersetzungsleiste für Englisch anbietet
+- SSH weiterhin erreichbar bleibt
 
 **Beispiel Ziel-URL:**
 ```
 https://schnyder.webflow.io/screens/sichtbar-screen
 ```
+
+---
+
+## Startkette (Boot → Kiosk)
+
+```
+systemd → getty@tty1 (autologin) → bash → .bash_profile → exec labwc → autostart → chromium
+```
+
+1. systemd startet `getty@tty1` mit Autologin-Override
+2. Benutzer wird automatisch auf tty1 eingeloggt (kein greetd/lightdm)
+3. `.bash_profile` erkennt tty1 (`$(tty) = /dev/tty1`) und startet labwc via `exec`
+4. labwc lädt `~/.config/labwc/environment` und führt `~/.config/labwc/autostart` aus
+5. `autostart` startet wlopm (Display an), ydotool (Mausbewegung) und Chromium (Kiosk)
+
+> **SSH bleibt unberührt:** `.bash_profile` prüft `$(tty)` – nur auf `/dev/tty1` wird labwc gestartet.
 
 ---
 
@@ -63,31 +80,35 @@ Die IP bleibt nun auch nach Reboots erhalten.
 
 ---
 
-## 2. Boot-Ziel: Grafische Oberfläche und Autologin
+## 2. Boot-Ziel und Autologin
 
-Damit der Kiosk-Modus funktioniert, muss das System automatisch in die grafische Oberfläche booten.
+### Display-Manager deaktivieren
 
-### Prüfen, ob das grafische Target aktiv ist:
+RPi OS Trixie (Desktop) kommt mit `greetd` als Display-Manager. Dieser muss deaktiviert werden, um Konflikte mit dem getty-Autologin zu vermeiden:
 
 ```bash
-systemctl get-default
+sudo systemctl disable greetd.service 2>/dev/null || true
 ```
 
-### Falls nicht `graphical.target`:
+### graphical.target setzen:
 
 ```bash
 sudo systemctl set-default graphical.target
 ```
 
-### Autologin in den Desktop aktivieren:
+### Getty-Autologin konfigurieren:
 
 ```bash
-sudo raspi-config
+sudo mkdir -p /etc/systemd/system/getty@tty1.service.d/
+sudo cat > /etc/systemd/system/getty@tty1.service.d/autologin.conf << EOF
+[Service]
+ExecStart=
+ExecStart=-/sbin/agetty --autologin BENUTZERNAME --noclear %I \$TERM
+EOF
+sudo systemctl daemon-reload
 ```
 
-1. **System Options** → **Boot / Auto Login**
-2. **Desktop Autologin** auswählen
-3. Beenden und neu starten
+> `BENUTZERNAME` durch den tatsächlichen Benutzernamen ersetzen (z.B. `screen-eingang`).
 
 ---
 
@@ -102,55 +123,120 @@ sudo apt install chromium -y
 
 ---
 
-## 4. Kiosk-Autostart mit labwc einrichten
+## 4. labwc Konfiguration
 
-labwc liest beim Start die Datei `~/.config/labwc/autostart`.
+### .bash_profile – labwc automatisch starten
 
-### Verzeichnis anlegen:
+Die Datei `~/.bash_profile` startet labwc nur auf tty1:
 
 ```bash
-mkdir -p ~/.config/labwc
+# Standard .profile laden (PATH, etc.)
+if [ -f "$HOME/.profile" ]; then
+    . "$HOME/.profile"
+fi
+
+# Automatisch labwc starten auf TTY1 (nicht bei SSH-Sessions)
+if [ -z "$WAYLAND_DISPLAY" ] && [ "$(tty)" = "/dev/tty1" ]; then
+    export XDG_SESSION_TYPE=wayland
+    export MOZ_ENABLE_WAYLAND=1
+    exec labwc > /tmp/labwc.log 2>&1
+fi
 ```
 
-### Autostart-Datei bearbeiten:
+### environment – Umgebungsvariablen
 
-```bash
-nano ~/.config/labwc/autostart
+`~/.config/labwc/environment`:
+```
+WLR_LIBINPUT_NO_DEVICES=1
+WLR_NO_HARDWARE_CURSORS=1
 ```
 
-### Inhalt (finale, funktionierende Version):
+### rc.xml – Cursor verstecken
 
+`~/.config/labwc/rc.xml`:
+```xml
+<?xml version="1.0"?>
+<labwc_config>
+  <core>
+    <hideCursor>true</hideCursor>
+  </core>
+
+  <keyboard>
+    <keybind key="A-F4">
+      <action name="Close"/>
+    </keybind>
+  </keyboard>
+
+  <windowRules>
+    <windowRule identifier="chromium*">
+      <property name="skipTaskbar" value="yes"/>
+      <action name="Maximize"/>
+    </windowRule>
+  </windowRules>
+</labwc_config>
+```
+
+### autostart – Kiosk-Startskript
+
+`~/.config/labwc/autostart`:
 ```bash
-# Bildschirmschoner und Standby deaktivieren
-wlopm --set-standby off
+#!/bin/bash
 
-# ydotool Daemon starten, um später die Maus zu bewegen
-ydotoold &
+# Warten bis labwc Outputs initialisiert hat
+sleep 2
 
-# 50 Sekunden warten, bis System und Chromium komplett geladen sind,
-# dann Maus um 100 Pixel bewegen, damit die Webflow-Regel den Cursor versteckt
+# Display einschalten und Standby deaktivieren
+wlopm --on '*' 2>/dev/null || true
+
+# Display-Keepalive (alle 5 Minuten)
+(while true; do sleep 300; wlopm --on '*' 2>/dev/null || true; done) &
+
+# ydotool Daemon starten
+(sleep 2 && ydotoold) &
+
+# Maus bewegen nach 50s (triggert Webflow Cursor-Hider)
 (sleep 50 && ydotool mousemove 100 100) &
 
-# Chromium im Kiosk- und Inkognito-Modus starten
-# Übersetzungsfunktionen soweit wie möglich deaktivieren
+# Chromium im Kiosk-Modus
 chromium \
-  --kiosk \
-  --incognito \
-  --noerrdialogs \
-  --disable-infobars \
-  --no-first-run \
-  --password-store=basic \
-  --disable-translate \
-  --disable-features=Translate,TranslateUI,LanguageDetection,TranslateSettings \
-  --start-maximized \
-  "https://schnyder.webflow.io/screens/sichtbar-screen" &
+    --ozone-platform=wayland \
+    --enable-features=UseOzonePlatform \
+    --kiosk \
+    --incognito \
+    --noerrdialogs \
+    --disable-infobars \
+    --disable-session-crashed-bubble \
+    --disable-restore-session-state \
+    --no-first-run \
+    --password-store=basic \
+    --disable-translate \
+    --disable-features=Translate,TranslateUI,LanguageDetection,TranslateSettings,MediaRouter \
+    --start-fullscreen \
+    --start-maximized \
+    --autoplay-policy=no-user-gesture-required \
+    --check-for-update-interval=31536000 \
+    --disable-background-networking \
+    --disable-component-update \
+    --disable-default-apps \
+    --disable-extensions \
+    --disable-popup-blocking \
+    --disable-gpu-sandbox \
+    --disable-crash-reporter \
+    --disable-breakpad \
+    --disable-hang-monitor \
+    --disable-domain-reliability \
+    --disable-client-side-phishing-detection \
+    --renderer-process-limit=1 \
+    "https://schnyder.webflow.io/screens/sichtbar-screen" &
 ```
 
 ### Hinweise:
 
-- `--incognito` stellt sicher, dass keine persistenten Daten/Popups zwischen Starts überleben.
-- Die `Translate*`-Flags reduzieren die Wahrscheinlichkeit, dass Chromium den Übersetzungsbalken einblendet.
-- Der eigentliche „Ausblendeffekt" für den Cursor passiert über die Website (Webflow), sobald Mausbewegung erkannt wird.
+- `--ozone-platform=wayland` und `--enable-features=UseOzonePlatform` sind **zwingend erforderlich** für Wayland
+- `--incognito` stellt sicher, dass keine persistenten Daten/Popups zwischen Starts überleben
+- `--renderer-process-limit=1` spart RAM auf dem RPi 3 (1 GB)
+- `--disable-crash-reporter` und `--disable-breakpad` verhindern Crash-Dialoge
+- Die `Translate*`-Flags und die Chromium-Policy reduzieren Übersetzungsdialoge
 
 ---
 
@@ -167,47 +253,40 @@ sudo apt install cmake libevdev-dev git scdoc -y
 ### 5.2. ydotool aus den Quellen bauen und installieren
 
 ```bash
-cd ~
-git clone https://github.com/ReimuNotMoe/ydotool.git
-cd ydotool
-mkdir build
-cd build
+cd /tmp
+git clone https://github.com/ReimuNotMoe/ydotool.git ydotool-build
+cd ydotool-build
+mkdir build && cd build
 cmake ..
-make
+make -j$(nproc)
 sudo make install
+cd /
+rm -rf /tmp/ydotool-build
 ```
 
 Damit werden `ydotool` und `ydotoold` unter `/usr/local/bin/` installiert.
 
 ### 5.3. Zugriffsrechte für /dev/uinput (Eingabeemulation)
 
-Chromium läuft als Benutzer. Dieser Benutzer braucht Rechte, um Eingaben zu emulieren.
-
 ```bash
 sudo usermod -aG input $USER
 echo 'KERNEL=="uinput", GROUP="input", MODE="0660", OPTIONS+="static_node=uinput"' | sudo tee /etc/udev/rules.d/80-uinput.rules
+
+# uinput Modul beim Boot laden
+echo "uinput" | sudo tee /etc/modules-load.d/uinput.conf
 ```
 
 **Anschliessend ist ein Neustart erforderlich, damit die Gruppenänderung aktiv wird.**
 
 ---
 
-## 6. Labwc-Mauskonfiguration (optional)
+## 6. Console Blanking deaktivieren
 
-Zusätzlich kann labwc angewiesen werden, den Cursor grundsätzlich zu verstecken. Das ist optional, da im Setup die Webflow-Regel das eigentliche Verstecken übernimmt.
+Zusätzlich zur Wayland-Konfiguration muss das Kernel-Console-Blanking deaktiviert werden:
 
 ```bash
-nano ~/.config/labwc/rc.xml
-```
-
-**Inhalt:**
-
-```xml
-<labwc_config>
-  <mouse>
-    <hideCursor>true</hideCursor>
-  </mouse>
-</labwc_config>
+# consoleblank=0 an cmdline.txt anhängen (RPi OS Trixie)
+sudo sed -i 's/$/ consoleblank=0/' /boot/firmware/cmdline.txt
 ```
 
 ---
@@ -216,16 +295,17 @@ nano ~/.config/labwc/rc.xml
 
 ### Ablauf nach einem Neustart:
 
-1. System bootet in `graphical.target`.
-2. Benutzer wird automatisch in die rpd‑labwc Session eingeloggt.
-3. `~/.config/labwc/autostart` wird ausgeführt:
-   - `wlopm --set-standby off` deaktiviert Standby/Bildschirmschoner.
-   - `ydotoold` startet im Hintergrund und stellt einen Eingabe-Socket bereit.
-   - `sleep 50 && ydotool mousemove 100 100` bewegt nach 50 Sekunden die Maus.
-   - Chromium startet im Kiosk-/Inkognito-Modus mit der Bildschirm-URL.
-4. Wenn Chromium und die Seite vollständig geladen sind, wird nach 50s eine Mausbewegung simuliert.
-5. Die Webflow-Logik („Maus ausblenden nach Inaktivität") erkennt zuerst Bewegung, dann Inaktivität und blendet den Cursor aus.
-6. **Nutzer sehen nur die Webflow-Seite im Vollbild, ohne Taskleiste, ohne Adressleiste, ohne Mauszeiger.**
+1. System bootet in `graphical.target`
+2. `getty@tty1` loggt den Benutzer automatisch ein (Autologin-Override)
+3. `.bash_profile` erkennt tty1 und startet `labwc` via `exec`
+4. labwc lädt `environment` und führt `autostart` aus:
+   - `wlopm --on '*'` schaltet das Display ein
+   - Keepalive-Loop hält das Display alle 5 Minuten aktiv
+   - `ydotoold` startet im Hintergrund
+   - Chromium startet im Kiosk-/Inkognito-Modus mit Wayland-Flags
+5. Nach 50 Sekunden wird eine Mausbewegung simuliert (ydotool)
+6. Die Webflow-Logik blendet den Cursor nach Inaktivität aus
+7. **Nutzer sehen nur die Webflow-Seite im Vollbild, ohne Taskleiste, ohne Adressleiste, ohne Mauszeiger**
 
 ---
 
@@ -236,17 +316,21 @@ nano ~/.config/labwc/rc.xml
 Trotz der Flags kann Chromium bei Seiten, die als `lang="en"` deklariert sind, gelegentlich einen Übersetzungsbalken zeigen.
 
 **Empfohlene Ergänzung auf Webflow-Seite:**
-- Das HTML-lang-Attribut für diese Screen-Seite auf `de` oder `de-CH` setzen, um die Wahrscheinlichkeit weiter zu reduzieren.
+- Das HTML-lang-Attribut auf `de` oder `de-CH` setzen
+
+### RPi 3 mit 1 GB RAM
+
+- Chromium nutzt `--renderer-process-limit=1` um RAM zu sparen
+- Bei komplexen Webseiten kann es zu Verlangsamungen kommen
+- Bei Bedarf: `WLR_RENDERER=pixman` in der environment-Datei setzen (Software-Rendering)
 
 ### ydotool Wartung
 
-- Falls `ydotool` oder `ydotoold` in einer späteren Debian-Version paketiert wird, könnte man das manuelle Build ersetzen.
-- Das Install-Skript automatisiert die Schritte aus Kapitel 5.
+Falls `ydotool` in einer späteren Debian-Version paketiert wird, kann das manuelle Build ersetzt werden.
 
-### Anpassungen für andere Screens / URLs
+### greetd-Konflikt
 
-- Nur die URL in der Autostart-Zeile anpassen.
-- IP-/Gateway-Werte in Abschnitt 1 an das jeweilige Netzwerk anpassen.
+RPi OS Trixie (Desktop-Variante) verwendet `greetd` als Display-Manager. Das Install-Skript deaktiviert greetd automatisch, da es mit dem getty-Autologin kollidiert.
 
 ---
 
@@ -267,12 +351,13 @@ sudo ./install.sh https://schnyder.webflow.io/screens/sichtbar-screen \
 
 1. Installiert alle benötigten Pakete
 2. Baut ydotool aus den Quellen
-3. Konfiguriert uinput-Zugriffsrechte
-4. Setzt graphical.target als Standard
-5. Erstellt labwc Konfiguration
-6. Konfiguriert Chromium Policies
-7. Richtet Autologin ein
-8. (Optional) Konfiguriert statische IP
+3. Konfiguriert uinput-Zugriffsrechte und Modul-Laden
+4. Erstellt labwc Konfiguration (rc.xml, environment, autostart)
+5. Konfiguriert Chromium Policies
+6. Deaktiviert greetd (falls vorhanden)
+7. Richtet getty-Autologin und .bash_profile ein
+8. Deaktiviert Console Blanking
+9. (Optional) Konfiguriert statische IP
 
 ---
 

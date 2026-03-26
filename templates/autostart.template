@@ -7,6 +7,9 @@ sleep 2
 # wlopm --on schaltet alle Ausgänge ein und verhindert Standby
 wlopm --on '*' 2>/dev/null || true
 
+# Display-Keepalive: alle 5 Minuten sicherstellen, dass der Bildschirm an bleibt
+(while true; do sleep 300; wlopm --on '*' 2>/dev/null || true; done) &
+
 # ydotool Daemon starten, um später die Maus zu bewegen
 # Warten, bis /dev/uinput verfügbar ist
 (sleep 2 && ydotoold) &
@@ -29,7 +32,7 @@ chromium \
     --no-first-run \
     --password-store=basic \
     --disable-translate \
-    --disable-features=Translate,TranslateUI,LanguageDetection,TranslateSettings \
+    --disable-features=Translate,TranslateUI,LanguageDetection,TranslateSettings,MediaRouter \
     --start-fullscreen \
     --start-maximized \
     --autoplay-policy=no-user-gesture-required \
@@ -40,4 +43,10 @@ chromium \
     --disable-extensions \
     --disable-popup-blocking \
     --disable-gpu-sandbox \
+    --disable-crash-reporter \
+    --disable-breakpad \
+    --disable-hang-monitor \
+    --disable-domain-reliability \
+    --disable-client-side-phishing-detection \
+    --renderer-process-limit=1 \
     "{{KIOSK_URL}}" &
