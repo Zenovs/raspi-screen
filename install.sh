@@ -169,23 +169,40 @@ EOF
 
 echo "  rc.xml erstellt (hideCursor aktiviert)"
 
+# environment erstellen (labwc lädt diese Datei beim Start)
+cat > "$KIOSK_HOME/.config/labwc/environment" << 'EOF'
+# Sicherstellen, dass labwc auch ohne angeschlossene Eingabegeräte startet
+WLR_LIBINPUT_NO_DEVICES=1
+# GPU-Rendering (Pixman als Fallback für ältere RPi-Modelle)
+# WLR_RENDERER=pixman
+EOF
+
+echo "  environment erstellt (WLR_LIBINPUT_NO_DEVICES gesetzt)"
+
 # autostart erstellen
 cat > "$KIOSK_HOME/.config/labwc/autostart" << EOF
 #!/bin/bash
 
+# Kurz warten, bis labwc Outputs vollständig initialisiert hat
+sleep 2
+
 # Bildschirmschoner und Standby deaktivieren
-wlopm --set-standby off
+# wlopm --on schaltet alle Ausgänge ein und verhindert Standby
+wlopm --on '*' 2>/dev/null || true
 
 # ydotool Daemon starten, um später die Maus zu bewegen
-ydotoold &
+# Warten, bis /dev/uinput verfügbar ist
+(sleep 2 && ydotoold) &
 
 # 50 Sekunden warten, bis System und Chromium komplett geladen sind,
 # dann Maus um 100 Pixel bewegen, damit die Webflow-Regel den Cursor versteckt
 (sleep 50 && ydotool mousemove 100 100) &
 
 # Chromium im Kiosk- und Inkognito-Modus starten
-# Übersetzungsfunktionen soweit wie möglich deaktivieren
+# --ozone-platform=wayland ist ERFORDERLICH für Wayland-Rendering
 chromium \\
+    --ozone-platform=wayland \\
+    --enable-features=UseOzonePlatform \\
     --kiosk \\
     --incognito \\
     --noerrdialogs \\
@@ -205,11 +222,12 @@ chromium \\
     --disable-default-apps \\
     --disable-extensions \\
     --disable-popup-blocking \\
+    --disable-gpu-sandbox \\
     "$KIOSK_URL" &
 EOF
 
 chmod +x "$KIOSK_HOME/.config/labwc/autostart"
-echo "  autostart erstellt (ydotool, Mausbewegung, Kiosk-Modus konfiguriert)"
+echo "  autostart erstellt (Wayland-Flags, ydotool, Kiosk-Modus konfiguriert)"
 
 # Berechtigungen setzen
 chown -R "$KIOSK_USER:$KIOSK_USER" "$KIOSK_HOME/.config/labwc"
@@ -241,36 +259,61 @@ fi
 echo ""
 echo -e "${YELLOW}[7/8] Display-Einstellungen und Autologin werden konfiguriert...${NC}"
 
-# wlopm systemd Service für permanentes Display
-cat > /etc/systemd/system/wlopm-keepalive.service << 'EOF'
+# wlopm-keepalive als systemd USER-Service (nicht System-Service!)
+# System-Services haben keinen Zugang zur Wayland-Session.
+# Stattdessen verwenden wir nur die autostart-Methode (wlopm im labwc autostart).
+# Falls ein alter System-Service existiert, deaktivieren wir ihn.
+if systemctl is-enabled wlopm-keepalive.service 2>/dev/null; then
+    systemctl disable wlopm-keepalive.service 2>/dev/null || true
+    echo "  Alter wlopm System-Service deaktiviert (inkompatibel mit Wayland-Session)"
+fi
+rm -f /etc/systemd/system/wlopm-keepalive.service
+
+# Stattdessen: wlopm-keepalive als systemd User-Service einrichten
+KIOSK_USER_ID=$(id -u "$KIOSK_USER")
+mkdir -p "$KIOSK_HOME/.config/systemd/user"
+cat > "$KIOSK_HOME/.config/systemd/user/wlopm-keepalive.service" << 'EOF'
 [Unit]
-Description=Keep display always on
-After=graphical.target
+Description=Keep display always on (Wayland)
+After=graphical-session.target
 
 [Service]
 Type=oneshot
-ExecStart=/usr/bin/wlopm --on '*'
+ExecStart=/usr/bin/wlopm --on *
 RemainAfterExit=yes
+Restart=on-failure
+RestartSec=5
 
 [Install]
-WantedBy=graphical.target
+WantedBy=graphical-session.target
 EOF
 
-systemctl daemon-reload
-systemctl enable wlopm-keepalive.service
-echo "  wlopm Service aktiviert (Display bleibt immer an)"
+chown -R "$KIOSK_USER:$KIOSK_USER" "$KIOSK_HOME/.config/systemd"
+# Aktivieren des User-Service (wird bei nächster Wayland-Session gestartet)
+su - "$KIOSK_USER" -c "systemctl --user daemon-reload 2>/dev/null || true"
+su - "$KIOSK_USER" -c "systemctl --user enable wlopm-keepalive.service 2>/dev/null || true"
+echo "  wlopm als User-Service konfiguriert (Display bleibt immer an)"
 
 # .bash_profile für automatischen labwc Start
+# WICHTIG: Zuerst .profile sourcen, damit PATH und andere Variablen gesetzt sind
 if ! grep -q "labwc" "$KIOSK_HOME/.bash_profile" 2>/dev/null; then
-    cat >> "$KIOSK_HOME/.bash_profile" << 'EOF'
+    cat >> "$KIOSK_HOME/.bash_profile" << 'BASHEOF'
+
+# Standard .profile laden (PATH, etc.)
+if [ -f "$HOME/.profile" ]; then
+    . "$HOME/.profile"
+fi
 
 # Automatisch labwc starten auf TTY1
 if [ -z "$WAYLAND_DISPLAY" ] && [ "$(tty)" = "/dev/tty1" ]; then
-    exec labwc
+    export XDG_SESSION_TYPE=wayland
+    export MOZ_ENABLE_WAYLAND=1
+    # labwc starten – dies setzt WAYLAND_DISPLAY und XDG_RUNTIME_DIR automatisch
+    exec labwc > /tmp/labwc.log 2>&1
 fi
-EOF
+BASHEOF
     chown "$KIOSK_USER:$KIOSK_USER" "$KIOSK_HOME/.bash_profile"
-    echo "  Auto-Login konfiguriert"
+    echo "  Auto-Login konfiguriert (.bash_profile mit .profile-Source)"
 fi
 
 # Autologin für getty konfigurieren

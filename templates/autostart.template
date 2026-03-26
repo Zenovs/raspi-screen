@@ -1,18 +1,25 @@
 #!/bin/bash
 
+# Kurz warten, bis labwc Outputs vollständig initialisiert hat
+sleep 2
+
 # Bildschirmschoner und Standby deaktivieren
-wlopm --set-standby off
+# wlopm --on schaltet alle Ausgänge ein und verhindert Standby
+wlopm --on '*' 2>/dev/null || true
 
 # ydotool Daemon starten, um später die Maus zu bewegen
-ydotoold &
+# Warten, bis /dev/uinput verfügbar ist
+(sleep 2 && ydotoold) &
 
 # 50 Sekunden warten, bis System und Chromium komplett geladen sind,
 # dann Maus um 100 Pixel bewegen, damit die Webflow-Regel den Cursor versteckt
 (sleep 50 && ydotool mousemove 100 100) &
 
 # Chromium im Kiosk- und Inkognito-Modus starten
-# Übersetzungsfunktionen soweit wie möglich deaktivieren
+# --ozone-platform=wayland ist ERFORDERLICH für Wayland-Rendering
 chromium \
+    --ozone-platform=wayland \
+    --enable-features=UseOzonePlatform \
     --kiosk \
     --incognito \
     --noerrdialogs \
@@ -32,4 +39,5 @@ chromium \
     --disable-default-apps \
     --disable-extensions \
     --disable-popup-blocking \
+    --disable-gpu-sandbox \
     "{{KIOSK_URL}}" &
